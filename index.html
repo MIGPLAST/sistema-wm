@@ -10,7 +10,7 @@
 <script>
 const KEY='wm_sistema_v1', defaultData={clients:[],orders:[],finance:[],rates:{golden:0,visao:0},posts:[],contractInitialized:false};
 let db;try{db=Object.assign({},defaultData,JSON.parse(localStorage.getItem(KEY)||'{}'))}catch(e){db=structuredClone(defaultData)}
-const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(db))}catch(e){alert('Armazenamento indisponível: exporte seu backup.')}};
+const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(db));window.dispatchEvent(new Event('wm-local-saved'))}catch(e){alert('Armazenamento indisponível: exporte seu backup.')}};
 const money=n=>(Number(n)||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const today=()=>new Date().toLocaleDateString('en-CA');
@@ -1566,7 +1566,7 @@ render=function(){wmRenderAuditOriginal();if(page==='Comissões')wmAllCommission
 <div class="wm-inner">
 <button id="wm-cloud-close" style="float:right;background:#586579" type="button">Fechar ×</button>
 <h2 style="margin:4px 0 8px">Nuvem WM — Firebase</h2>
-<p>Primeiro faça backup. O envio e a restauração só ocorrem quando você clicar. Nenhum dado será substituído automaticamente.</p>
+<p>Sincronização protegida: após restaurar ou enviar os dados uma vez, alterações serão sincronizadas automaticamente. Em caso de conflito, o sistema interrompe a sincronização para proteger seus cadastros.</p>
 <label>E-mail cadastrado no Firebase<input id="wm-cloud-email" type="email" autocomplete="username" placeholder="seuemail@exemplo.com"></label>
 <label>Senha do Firebase<input id="wm-cloud-password" type="password" autocomplete="current-password" placeholder="Sua senha"></label>
 <div><button id="wm-cloud-login" type="button">Entrar</button><button id="wm-cloud-verify" type="button">Enviar verificação de e-mail</button><button id="wm-cloud-logout" type="button">Sair</button></div>
@@ -1580,7 +1580,7 @@ render=function(){wmRenderAuditOriginal();if(page==='Comissões')wmAllCommission
 <script type="module">
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
 import { getAuth, signInWithEmailAndPassword, signOut, sendEmailVerification, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
-import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp, onSnapshot, runTransaction } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 const firebaseConfig={apiKey:'AIzaSyC0kmL4cys9Iahk_QFypmwOcRzT3ZRMKeI',authDomain:'sistema-wm-347b5.firebaseapp.com',projectId:'sistema-wm-347b5',storageBucket:'sistema-wm-347b5.firebasestorage.app',messagingSenderId:'580844229602',appId:'1:580844229602:web:93d7e9fc2b9609b6b45fbb'};
 const app=initializeApp(firebaseConfig),auth=getAuth(app),store=getFirestore(app);
 const el=id=>document.getElementById(id),status=s=>{el('wm-cloud-status').textContent=s};
@@ -1592,12 +1592,83 @@ const user=()=>{const u=auth.currentUser;if(!u)throw Error('Entre com seu e-mail
 const cloudDoc=u=>doc(store,'wm_user_data',u.uid);
 const run=fn=>async()=>{try{status('Processando...');await fn()}catch(e){status('Não foi possível concluir: '+(e.message||e.code||String(e)))}};
 el('wm-cloud-open').onclick=()=>el('wm-cloud-panel').style.display='block';el('wm-cloud-close').onclick=()=>el('wm-cloud-panel').style.display='none';
-onAuthStateChanged(auth,u=>status(u?'Conectado: '+u.email+(u.emailVerified?' (verificado)':' (e-mail não verificado)'):'Desconectado. Seus dados locais não foram alterados.'));
+// WM: sincronização protegida, com revisão e detecção de conflitos.
+const syncPrefix='wm_cloud_sync_v2_';
+let syncTimer=null, syncUnsubscribe=null, syncBusy=false, syncBlocked=false, activeUid=null;
+const syncStorageKey=()=>syncPrefix+(auth.currentUser?.uid||'');
+function metadata(){try{return JSON.parse(localStorage.getItem(syncStorageKey())||'null')}catch{return null}}
+function markSynced(payload,revision){
+  localStorage.setItem(syncStorageKey(),JSON.stringify({payload,revision:Number(revision)||0}));
+  syncBlocked=false;
+}
+function stopWatching(){
+  if(syncTimer){clearInterval(syncTimer);syncTimer=null}
+  if(syncUnsubscribe){syncUnsubscribe();syncUnsubscribe=null}
+  activeUid=null;syncBusy=false;syncBlocked=false;
+}
+function haltSync(message){
+  syncBlocked=true;
+  status('SINCRONIZAÇÃO INTERROMPIDA: '+message+' Faça backup local antes de resolver. Nenhum cadastro foi substituído.');
+}
+async function checkCloudAndSync(){
+  const u=auth.currentUser;
+  if(!u||!u.emailVerified||syncBusy||syncBlocked||activeUid!==u.uid)return;
+  const meta=metadata();if(!meta||typeof meta.payload!=='string')return;
+  syncBusy=true;
+  try{
+    const current=local(), payload=JSON.stringify(current);
+    if(payload===meta.payload)return;
+    const ref=cloudDoc(u);
+    // A transação compara a revisão remota ANTES de gravar.
+    const nextRev=await runTransaction(store,async tx=>{
+      const snap=await tx.get(ref);
+      if(!snap.exists())throw Error('O backup remoto foi removido.');
+      const remote=snap.data(),rev=Number(remote.revision||0);
+      if(rev!==Number(meta.revision||0)||remote.payload!==meta.payload)throw Error('A nuvem mudou em outro aparelho.');
+      tx.set(ref,{payload,revision:rev+1,updatedAt:serverTimestamp(),schema:2});
+      return rev+1;
+    });
+    // Não considerar uma edição posterior como já sincronizada.
+    markSynced(payload,nextRev);
+    status('Sincronizado automaticamente com a nuvem: '+counts(current)+'.');
+  }catch(e){haltSync(e.message||String(e))}
+  finally{syncBusy=false}
+}
+function watch(u){
+  stopWatching();
+  if(!u||!u.emailVerified)return;
+  activeUid=u.uid;
+  const meta=metadata();
+  if(!meta||typeof meta.payload!=='string')return;
+  const ref=cloudDoc(u);
+  syncUnsubscribe=onSnapshot(ref,snap=>{
+    if(syncBlocked||syncBusy)return;
+    const m=metadata();if(!m)return;
+    if(!snap.exists())return haltSync('Backup remoto não encontrado.');
+    const remote=snap.data(),rev=Number(remote.revision||0);
+    if(rev===Number(m.revision||0)&&remote.payload===m.payload)return;
+    let current;
+    try{current=JSON.stringify(local())}catch(e){return haltSync(e.message)}
+    if(current!==m.payload)return haltSync('Há alterações locais e remotas diferentes.');
+    try{
+      const d=JSON.parse(remote.payload||'null');
+      if(!d||!Array.isArray(d.clients)||!Array.isArray(d.orders))throw Error('Dados remotos inválidos.');
+      backup(JSON.parse(current));
+      localStorage.setItem(key,JSON.stringify(d));
+      markSynced(JSON.stringify(d),rev);
+      status('Atualização recebida da nuvem. Recarregando o sistema...');
+      setTimeout(()=>location.reload(),900);
+    }catch(e){haltSync(e.message||String(e))}
+  },e=>haltSync('Erro de acesso à nuvem: '+(e.message||String(e))));
+  syncTimer=setInterval(checkCloudAndSync,2000);
+  setTimeout(checkCloudAndSync,300);
+}
+onAuthStateChanged(auth,u=>{watch(u);status(u?'Conectado: '+u.email+(u.emailVerified?' (verificado)':' (e-mail não verificado)')+(metadata()?' — sincronização protegida ativa.':' — restaure o backup para ativar a sincronização.'):'Desconectado. Seus dados locais não foram alterados.');});
 el('wm-cloud-login').onclick=run(async()=>{await signInWithEmailAndPassword(auth,el('wm-cloud-email').value.trim(),el('wm-cloud-password').value);await auth.currentUser.reload();status('Login realizado. E-mail verificado: '+(auth.currentUser.emailVerified?'sim':'não')+'.')});
 el('wm-cloud-verify').onclick=run(async()=>{const u=auth.currentUser;if(!u)throw Error('Entre primeiro com e-mail e senha.');await sendEmailVerification(u);status('E-mail de verificação enviado. Abra sua caixa de entrada, confirme e entre novamente.')});
 el('wm-cloud-logout').onclick=run(async()=>{await signOut(auth);status('Você saiu da conta.')});
 el('wm-cloud-backup').onclick=run(async()=>{const d=local();backup(d);status('Backup local solicitado: '+counts(d)+'. Confirme que o arquivo foi salvo em Downloads.')});
-el('wm-cloud-upload').onclick=run(async()=>{const u=user(),d=local();if(!confirm('Enviar '+counts(d)+' deste aparelho para a nuvem? Se já houver dados na nuvem, serão substituídos. Confira se este é o aparelho mais atualizado.'))return status('Envio cancelado.');const ref=cloudDoc(u),existing=await getDoc(ref);if(existing.exists()&&!confirm('Já existem dados na nuvem! Substituir o conteúdo remoto pelo deste aparelho?'))return status('Envio cancelado.');await setDoc(ref,{payload:JSON.stringify(d),updatedAt:serverTimestamp(),schema:1});status('Envio concluído: '+counts(d)+'. Os dados locais não foram alterados.')});
-el('wm-cloud-download').onclick=run(async()=>{const u=user(),snap=await getDoc(cloudDoc(u));if(!snap.exists())throw Error('Não há backup na nuvem para este usuário.');const d=JSON.parse(snap.data().payload||'null');if(!d||!Array.isArray(d.clients)||!Array.isArray(d.orders))throw Error('Dados remotos inválidos.');let current=null;try{current=local()}catch{}if(!confirm('A nuvem contém '+counts(d)+'. Este aparelho tem '+(current?counts(current):'nenhum cadastro válido')+'. RESTAURAR vai substituir os dados locais. Deseja continuar?'))return status('Restauração cancelada.');if(current)backup(current);localStorage.setItem(key,JSON.stringify(d));status('Dados restaurados: '+counts(d)+'. Recarregando...');setTimeout(()=>location.reload(),900)});
+el('wm-cloud-upload').onclick=run(async()=>{const u=user(),d=local();if(!confirm('Enviar '+counts(d)+' deste aparelho para a nuvem? Se já houver dados na nuvem, serão substituídos. Confira se este é o aparelho mais atualizado.'))return status('Envio cancelado.');const ref=cloudDoc(u),existing=await getDoc(ref);if(existing.exists()&&!confirm('Já existem dados na nuvem! Substituir o conteúdo remoto pelo deste aparelho?'))return status('Envio cancelado.');const rev=Number(existing.exists()?existing.data().revision||0:0)+1;const payload=JSON.stringify(d);await setDoc(ref,{payload,revision:rev,updatedAt:serverTimestamp(),schema:2});markSynced(payload,rev);watch(u);status('Envio concluído: '+counts(d)+'. Sincronização automática ativada neste aparelho.')});
+el('wm-cloud-download').onclick=run(async()=>{const u=user(),snap=await getDoc(cloudDoc(u));if(!snap.exists())throw Error('Não há backup na nuvem para este usuário.');const d=JSON.parse(snap.data().payload||'null');if(!d||!Array.isArray(d.clients)||!Array.isArray(d.orders))throw Error('Dados remotos inválidos.');let current=null;try{current=local()}catch{}if(!confirm('A nuvem contém '+counts(d)+'. Este aparelho tem '+(current?counts(current):'nenhum cadastro válido')+'. RESTAURAR vai substituir os dados locais. Deseja continuar?'))return status('Restauração cancelada.');if(current)backup(current);localStorage.setItem(key,JSON.stringify(d));markSynced(JSON.stringify(d),Number(snap.data().revision||0));status('Dados restaurados: '+counts(d)+'. Sincronização automática ativada. Recarregando...');setTimeout(()=>location.reload(),900)});
 </script>
 </body></html>
