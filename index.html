@@ -1552,4 +1552,52 @@ render=function(){wmRenderAuditOriginal();if(page==='Comissões')wmAllCommission
  wmShareCommissionPdf=function(){return window.wmcPdf()};
 })();
 </script>
+<!-- WM Firebase: conexão opcional, sem sincronização automática destrutiva -->
+<style>
+#wm-cloud-open{position:fixed;right:14px;bottom:16px;z-index:2147483000;background:#0757a7;color:white;border:2px solid white;border-radius:40px;padding:12px 17px;font:600 15px Arial;box-shadow:0 2px 14px #0005;cursor:pointer}
+#wm-cloud-panel{display:none;position:fixed;inset:0;z-index:2147483001;background:#0009;overflow:auto;padding:15px;font:15px Arial;color:#14263c}
+#wm-cloud-panel .wm-inner{max-width:510px;margin:5vh auto;background:white;padding:22px;border-radius:14px;box-shadow:0 5px 30px #0005}
+#wm-cloud-panel input{width:100%;box-sizing:border-box;padding:11px;margin:7px 0 12px;border:1px solid #aab7c5;border-radius:6px;font:inherit}
+#wm-cloud-panel button{padding:10px 13px;margin:5px 4px 5px 0;border:0;border-radius:6px;background:#0757a7;color:white;cursor:pointer;font:inherit}
+#wm-cloud-panel button:disabled{opacity:.5}#wm-cloud-panel .danger{background:#a34819}#wm-cloud-status{white-space:pre-wrap;overflow-wrap:anywhere;background:#f1f5fa;padding:10px;border-radius:6px}
+</style>
+<button id="wm-cloud-open" type="button">☁ Nuvem WM</button>
+<div id="wm-cloud-panel" role="dialog" aria-label="Nuvem WM">
+<div class="wm-inner">
+<button id="wm-cloud-close" style="float:right;background:#586579" type="button">Fechar ×</button>
+<h2 style="margin:4px 0 8px">Nuvem WM — Firebase</h2>
+<p>Primeiro faça backup. O envio e a restauração só ocorrem quando você clicar. Nenhum dado será substituído automaticamente.</p>
+<label>E-mail cadastrado no Firebase<input id="wm-cloud-email" type="email" autocomplete="username" placeholder="seuemail@exemplo.com"></label>
+<label>Senha do Firebase<input id="wm-cloud-password" type="password" autocomplete="current-password" placeholder="Sua senha"></label>
+<div><button id="wm-cloud-login" type="button">Entrar</button><button id="wm-cloud-verify" type="button">Enviar verificação de e-mail</button><button id="wm-cloud-logout" type="button">Sair</button></div>
+<hr>
+<div><button id="wm-cloud-backup" type="button">1. Baixar backup local</button></div>
+<div><button id="wm-cloud-upload" type="button">2. Enviar dados deste aparelho à nuvem</button></div>
+<div><button id="wm-cloud-download" class="danger" type="button">3. Restaurar dados da nuvem neste aparelho</button></div>
+<p style="font-size:13px">A restauração substitui os registros locais somente após sua confirmação e faz uma cópia de segurança primeiro. Para começar, envie à nuvem pelo aparelho que possui os dados mais recentes.</p>
+<div id="wm-cloud-status" role="status">Aguardando conexão.</div>
+</div></div>
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-app.js';
+import { getAuth, signInWithEmailAndPassword, signOut, sendEmailVerification, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-auth.js';
+import { getFirestore, doc, getDoc, setDoc, serverTimestamp } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
+const firebaseConfig={apiKey:'AIzaSyC0kmL4cys9Iahk_QFypmwOcRzT3ZRMKeI',authDomain:'sistema-wm-347b5.firebaseapp.com',projectId:'sistema-wm-347b5',storageBucket:'sistema-wm-347b5.firebasestorage.app',messagingSenderId:'580844229602',appId:'1:580844229602:web:93d7e9fc2b9609b6b45fbb'};
+const app=initializeApp(firebaseConfig),auth=getAuth(app),store=getFirestore(app);
+const el=id=>document.getElementById(id),status=s=>{el('wm-cloud-status').textContent=s};
+const key='wm_sistema_v1';
+const local=()=>{const raw=localStorage.getItem(key);if(!raw)throw Error('Nenhum cadastro local encontrado neste endereço.');const obj=JSON.parse(raw);if(!obj||typeof obj!=='object'||!Array.isArray(obj.clients)||!Array.isArray(obj.orders))throw Error('Dados locais inválidos.');return obj};
+const counts=d=>`${d.clients?.length||0} clientes e ${d.orders?.length||0} pedidos`;
+function backup(d){const blob=new Blob([JSON.stringify(d,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='backup-wm-'+new Date().toISOString().slice(0,10)+'-'+Date.now()+'.json';document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),10000)}
+const user=()=>{const u=auth.currentUser;if(!u)throw Error('Entre com seu e-mail e senha.');if(!u.emailVerified)throw Error('Seu e-mail ainda não foi verificado. Use “Enviar verificação de e-mail”, confirme pelo e-mail e entre novamente.');return u};
+const cloudDoc=u=>doc(store,'wm_user_data',u.uid);
+const run=fn=>async()=>{try{status('Processando...');await fn()}catch(e){status('Não foi possível concluir: '+(e.message||e.code||String(e)))}};
+el('wm-cloud-open').onclick=()=>el('wm-cloud-panel').style.display='block';el('wm-cloud-close').onclick=()=>el('wm-cloud-panel').style.display='none';
+onAuthStateChanged(auth,u=>status(u?'Conectado: '+u.email+(u.emailVerified?' (verificado)':' (e-mail não verificado)'):'Desconectado. Seus dados locais não foram alterados.'));
+el('wm-cloud-login').onclick=run(async()=>{await signInWithEmailAndPassword(auth,el('wm-cloud-email').value.trim(),el('wm-cloud-password').value);await auth.currentUser.reload();status('Login realizado. E-mail verificado: '+(auth.currentUser.emailVerified?'sim':'não')+'.')});
+el('wm-cloud-verify').onclick=run(async()=>{const u=auth.currentUser;if(!u)throw Error('Entre primeiro com e-mail e senha.');await sendEmailVerification(u);status('E-mail de verificação enviado. Abra sua caixa de entrada, confirme e entre novamente.')});
+el('wm-cloud-logout').onclick=run(async()=>{await signOut(auth);status('Você saiu da conta.')});
+el('wm-cloud-backup').onclick=run(async()=>{const d=local();backup(d);status('Backup local solicitado: '+counts(d)+'. Confirme que o arquivo foi salvo em Downloads.')});
+el('wm-cloud-upload').onclick=run(async()=>{const u=user(),d=local();if(!confirm('Enviar '+counts(d)+' deste aparelho para a nuvem? Se já houver dados na nuvem, serão substituídos. Confira se este é o aparelho mais atualizado.'))return status('Envio cancelado.');const ref=cloudDoc(u),existing=await getDoc(ref);if(existing.exists()&&!confirm('Já existem dados na nuvem! Substituir o conteúdo remoto pelo deste aparelho?'))return status('Envio cancelado.');await setDoc(ref,{payload:JSON.stringify(d),updatedAt:serverTimestamp(),schema:1});status('Envio concluído: '+counts(d)+'. Os dados locais não foram alterados.')});
+el('wm-cloud-download').onclick=run(async()=>{const u=user(),snap=await getDoc(cloudDoc(u));if(!snap.exists())throw Error('Não há backup na nuvem para este usuário.');const d=JSON.parse(snap.data().payload||'null');if(!d||!Array.isArray(d.clients)||!Array.isArray(d.orders))throw Error('Dados remotos inválidos.');let current=null;try{current=local()}catch{}if(!confirm('A nuvem contém '+counts(d)+'. Este aparelho tem '+(current?counts(current):'nenhum cadastro válido')+'. RESTAURAR vai substituir os dados locais. Deseja continuar?'))return status('Restauração cancelada.');if(current)backup(current);localStorage.setItem(key,JSON.stringify(d));status('Dados restaurados: '+counts(d)+'. Recarregando...');setTimeout(()=>location.reload(),900)});
+</script>
 </body></html>
